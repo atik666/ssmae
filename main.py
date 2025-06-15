@@ -29,61 +29,9 @@ if __name__ == "__main__":
     print(f"Encoder parameters: {encoder_params:,}")
     print(f"Classifier parameters: {classifier_params:,}")
 
-    # Define transformations for labeled data
-    # These should match the transformations used during training
-    img_size = 224 # Example image size
-    labeled_transform = transforms.Compose([
-        transforms.Resize((img_size, img_size)),
-        transforms.RandomHorizontalFlip(p=0.5),
-        transforms.RandomRotation(15),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                           std=[0.229, 0.224, 0.225])
-    ])
-
-    test_transform = transforms.Compose([
-        transforms.Resize((img_size, img_size)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                           std=[0.229, 0.224, 0.225])
-    ])
-
-
-    unlabeled_data = "./data/train/unlabeled"
-    labeled_data_train = "./data/train/labeled"
-    labeled_data_test = "./data/test"
-
-    unlabeled_dataset = ImageFolder(root=unlabeled_data, transform=labeled_transform)
-    labeled_dataset = ImageFolder(root=labeled_data_train, transform=labeled_transform)
-    test_dataset = ImageFolder(root=labeled_data_test, transform=test_transform)
-
-    unlabeled_dataloader = DataLoader(
-        unlabeled_dataset,
-        batch_size=32,
-        shuffle=True, # Shuffle for training
-        num_workers=4,
-        pin_memory=True,
-        drop_last=True # Recommended if zipping with another dataloader
-    )
-
-    labeled_dataloader = DataLoader(
-        labeled_dataset,
-        batch_size=16,
-        shuffle=True, # Shuffle for training
-        num_workers=4,
-        pin_memory=True,
-        drop_last=True # Recommended if zipping with another dataloader
-    )
-
-    test_dataloader = DataLoader(
-        test_dataset,
-        batch_size=8,
-        shuffle=False, # No need to shuffle for evaluation
-        num_workers=4,
-        pin_memory=True,
-        drop_last=False # No need to drop last batch for evaluation
-    )
+    unlabeled_data_path = "./data/train/unlabeled"
+    labeled_data_train_path = "./data/train/labeled"
+    labeled_data_test_path = "./data/test"
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -94,4 +42,4 @@ if __name__ == "__main__":
     # TODO: need to pass the datapath (not dataloader) to the train function for doing the augmentation (transformations) later.
 
     # train_SSMAE(model, unlabeled_dataloader, labeled_dataloader, optimizer, device, num_epochs=100, eval_dataloader=test_dataloader)
-    train_SSMAE_w_unlabeled(model, unlabeled_dataloader, labeled_dataloader, optimizer, device, num_epochs=100, eval_dataloader=test_dataloader)
+    train_SSMAE_w_unlabeled(model, unlabeled_data_path, labeled_data_train_path, optimizer, device, num_epochs=100, labeled_data_test_path=labeled_data_test_path)

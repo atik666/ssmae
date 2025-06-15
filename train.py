@@ -4,6 +4,9 @@ from torch import nn
 from tqdm import tqdm
 import os
 from torch.utils.data import TensorDataset, ConcatDataset, DataLoader
+from torchvision import transforms
+from torchvision.datasets import ImageFolder
+from torch.utils.data import DataLoader
 
 def create_mae_model(model_size='base', num_classes=1000):
     """Create MAE model with different sizes and classification capability"""
@@ -138,7 +141,7 @@ def evaluate_classification(model, eval_dataloader, criterion, device,
             for images, _ in pseudo_label_progress_bar:
                 images = images.to(device)
 
-                logits = model(images, mode='classify')
+                logits = model(images, mask_ratio=None, mode='classify')
                 prob = torch.softmax(logits, dim=1)
 
                 max_probs, pred_labels = torch.max(prob, dim=1)
@@ -152,10 +155,65 @@ def evaluate_classification(model, eval_dataloader, criterion, device,
     return avg_eval_loss, epoch_eval_accuracy, new_pseudo_labeled_data
 
 
-def train_SSMAE_w_unlabeled(model, unlabeled_dataloader, labeled_dataloader, optimizer, device, 
-                num_epochs=100, eval_dataloader=None, checkpoint_path='models/best_model.pth',
-                unlabeled_eval_dataloader=None, confidence_threshold=0.95):
+def train_SSMAE_w_unlabeled(model, unlabeled_data_path, labeled_data_train_path, optimizer, device, 
+                num_epochs=100, labeled_data_test_path=None, checkpoint_path='models/best_model.pth', confidence_threshold=0.95, **kwargs):
     """Training loop for SSMAE with unlabeled data"""
+
+    # Load model if checkpoint exists
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        print(f"Loading last saved model weights from {checkpoint_path} ...")
+        model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+
+    # Define transformations for labeled data
+    # These should match the transformations used during training
+    img_size = 224 # Example image size
+    labeled_transform = transforms.Compose([
+        transforms.Resize((img_size, img_size)),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.RandomRotation(15),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                           std=[0.229, 0.224, 0.225])
+    ])
+
+    test_transform = transforms.Compose([
+        transforms.Resize((img_size, img_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                           std=[0.229, 0.224, 0.225])
+    ])
+
+    unlabeled_dataset = ImageFolder(root=unlabeled_data_path, transform=labeled_transform)
+    labeled_dataset = ImageFolder(root=labeled_data_train_path, transform=labeled_transform)
+    test_dataset = ImageFolder(root=labeled_data_test_path, transform=test_transform)
+
+    unlabeled_dataloader = DataLoader(
+        unlabeled_dataset,
+        batch_size=32,
+        shuffle=True, # Shuffle for training
+        num_workers=4,
+        pin_memory=True,
+        drop_last=True # Recommended if zipping with another dataloader
+    )
+
+    labeled_dataloader = DataLoader(
+        labeled_dataset,
+        batch_size=16,
+        shuffle=True, # Shuffle for training
+        num_workers=4,
+        pin_memory=True,
+        drop_last=True # Recommended if zipping with another dataloader
+    )
+
+    eval_dataloader = DataLoader(
+        test_dataset,
+        batch_size=8,
+        shuffle=False, # No need to shuffle for evaluation
+        num_workers=4,
+        pin_memory=True,
+        drop_last=False # No need to drop last batch for evaluation
+    )
 
     def collate_fn(batch):
         imgs  = torch.stack([b[0] for b in batch], dim=0)
@@ -222,7 +280,7 @@ def train_SSMAE_w_unlabeled(model, unlabeled_dataloader, labeled_dataloader, opt
             mae_loss, pred, mask = model(all_images, mode='mae')
 
             # Classification loss from labeled data only (which now includes pseudo-labels)
-            logits = model(labeled_images, mode='classify')
+            logits = model(labeled_images, mask_ratio=None, mode='classify')
             cls_loss = criterion(logits, labels)
 
             # Combine both losses
