@@ -92,7 +92,8 @@ def train_classification(model, dataloader, optimizer, criterion, device, num_ep
         print(f'Epoch {epoch} completed, Average Loss: {avg_loss:.4f}, Accuracy: {accuracy:.2f}%')
 
 def evaluate_classification(model, eval_dataloader, criterion, device, 
-                            unlabeled_dataloader=None, threshold=0.95):
+                            unlabeled_dataloader=None, threshold=0.95,
+                            already_pseudo_labeled_indices=None):
     """Helper function to evaluate model on classification task"""
     model.eval()  # Set model to evaluation mode
     total_eval_loss = 0
@@ -128,6 +129,7 @@ def evaluate_classification(model, eval_dataloader, criterion, device,
     print(f"Evaluation: Avg Loss: {avg_eval_loss:.4f}, Accuracy: {epoch_eval_accuracy:.2f}%")
 
     new_pseudo_labeled_data = []
+    new_pseudo_labeled_indices = set()
     if unlabeled_dataloader is not None:
         print(f"Generating pseudo-labels with threshold {threshold}...")
         pseudo_label_progress_bar = tqdm(
@@ -138,8 +140,10 @@ def evaluate_classification(model, eval_dataloader, criterion, device,
         )
         model.eval() # Ensure model is in eval mode
         with torch.no_grad():
-            for images, _ in pseudo_label_progress_bar:
+            for batch_idx, (images, _) in enumerate(pseudo_label_progress_bar):
                 images = images.to(device)
+                start_idx = batch_idx * unlabeled_dataloader.batch_size
+
 
                 logits = model(images, mask_ratio=None, mode='classify')
                 prob = torch.softmax(logits, dim=1)
@@ -147,12 +151,16 @@ def evaluate_classification(model, eval_dataloader, criterion, device,
                 max_probs, pred_labels = torch.max(prob, dim=1)
 
                 for i in range(images.size(0)):
+                    global_idx = start_idx + i
+                    if already_pseudo_labeled_indices and global_idx in already_pseudo_labeled_indices:
+                        continue  # Skip already pseudo-labeled
                     if max_probs[i].item() > threshold:
                         new_pseudo_labeled_data.append((images[i].cpu().float(), pred_labels[i].unsqueeze(0).cpu().long()))
+                        new_pseudo_labeled_indices.add(global_idx)
 
         print(f"Generated {len(new_pseudo_labeled_data)} new pseudo-labels.")
     
-    return avg_eval_loss, epoch_eval_accuracy, new_pseudo_labeled_data
+    return avg_eval_loss, epoch_eval_accuracy, new_pseudo_labeled_data, new_pseudo_labeled_indices
 
 
 def train_SSMAE_w_unlabeled(model, unlabeled_data_path, labeled_data_train_path, optimizer, device, 
@@ -224,6 +232,7 @@ def train_SSMAE_w_unlabeled(model, unlabeled_data_path, labeled_data_train_path,
     criterion = nn.CrossEntropyLoss()
     best_val_accuracy = 0.0
     active_pseudo_labels = [] # Stores (image_tensor, label_tensor) from previous epoch's eval
+    already_pseudo_labeled_indices = set() # Track indices of already pseudo-labeled samples
 
     original_labeled_dataset = labeled_dataloader.dataset
 
@@ -319,16 +328,21 @@ def train_SSMAE_w_unlabeled(model, unlabeled_data_path, labeled_data_train_path,
         if eval_dataloader is not None: # TODO: if a sample already passed the threshold, it should not be evaluated again
             # Evaluate on the labeled validation set and generate new pseudo-labels for the next epoch
             # Pass unlabeled_eval_dataloader for pseudo-label generation
-            _, epoch_eval_accuracy, new_pseudo_labels_from_eval = evaluate_classification(
+            _, epoch_eval_accuracy, new_pseudo_labels_from_eval, new_pseudo_label_indices = evaluate_classification(
                 model=model, 
                 eval_dataloader=eval_dataloader, 
                 criterion=criterion, 
                 device=device,
                 unlabeled_dataloader=unlabeled_dataloader, # Use this for pseudo-labeling
-                threshold=confidence_threshold
+                threshold=confidence_threshold,
+                already_pseudo_labeled_indices=already_pseudo_labeled_indices
             )
 
             active_pseudo_labels = new_pseudo_labels_from_eval # Update pseudo-labels for the next epoch
+            already_pseudo_labeled_indices.update(new_pseudo_label_indices) # Update indices of already pseudo-labeled samples
+
+            print(f"New pseudo-labels this epoch: {len(new_pseudo_label_indices)}")
+            print(f"Total accumulated pseudo-labels: {len(already_pseudo_labeled_indices)}")
 
             # Save the model if validation accuracy on Labeled data improves
             if epoch_eval_accuracy > best_val_accuracy:
