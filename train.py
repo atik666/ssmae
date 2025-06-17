@@ -3,10 +3,10 @@ import torch
 from torch import nn
 from tqdm import tqdm
 import os
-from torch.utils.data import TensorDataset, ConcatDataset, DataLoader
+from torch.utils.data import TensorDataset, ConcatDataset, DataLoader, Dataset
 from torchvision import transforms
 from torchvision.datasets import ImageFolder
-from torch.utils.data import DataLoader
+from PIL import Image
 
 def create_mae_model(model_size='base', num_classes=1000):
     """Create MAE model with different sizes and classification capability"""
@@ -29,6 +29,22 @@ def create_mae_model(model_size='base', num_classes=1000):
     config['num_classes'] = num_classes
     return MaskedAutoencoder(**config)
 
+class PseudoLabelDataset(Dataset):
+    def __init__(self, image_paths, labels, transform=None):
+        self.image_paths = image_paths  # list of file paths
+        self.labels = labels            # list or tensor of ints
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        img = Image.open(self.image_paths[idx]).convert('RGB')
+        if self.transform:
+            img = self.transform(img)
+        label = self.labels[idx]
+        return img, label
+
 def train_mae(model, dataloader, optimizer, device, num_epochs=100):
     """Training loop for MAE pretraining"""
     model.train()
@@ -43,7 +59,7 @@ def train_mae(model, dataloader, optimizer, device, num_epochs=100):
             optimizer.zero_grad()
             
             # Forward pass in MAE mode
-            loss, pred, mask = model(images, mode='mae')
+            loss, pred, mask = model(images, None, mode='mae')
             loss.backward()
             optimizer.step()
             
@@ -71,7 +87,7 @@ def train_classification(model, dataloader, optimizer, criterion, device, num_ep
             optimizer.zero_grad()
             
             # Forward pass in classification mode
-            logits = model(images, mode='classify')
+            logits = model(images, None, 'classify')
             loss = criterion(logits, labels)
             
             loss.backward()
@@ -92,8 +108,10 @@ def train_classification(model, dataloader, optimizer, criterion, device, num_ep
         print(f'Epoch {epoch} completed, Average Loss: {avg_loss:.4f}, Accuracy: {accuracy:.2f}%')
 
 def evaluate_classification(model, eval_dataloader, criterion, device, 
-                            unlabeled_dataloader=None, threshold=0.95,
-                            already_pseudo_labeled_indices=None):
+                            unlabeled_dataloader=None, unlabeled_dataset=None, threshold=0.95,
+                            already_pseudo_labeled_indices=None,
+                            weak_transform=None, strong_transform=None,
+                            ):
     """Helper function to evaluate model on classification task"""
     model.eval()  # Set model to evaluation mode
     total_eval_loss = 0
@@ -112,7 +130,7 @@ def evaluate_classification(model, eval_dataloader, criterion, device,
         for images, labels in eval_progress_bar:
             images, labels = images.to(device), labels.to(device)
             
-            logits = model(images, mode='classify')
+            logits = model(images, None, 'classify')
             loss = criterion(logits, labels)
             
             total_eval_loss += loss.item()
@@ -130,7 +148,7 @@ def evaluate_classification(model, eval_dataloader, criterion, device,
 
     new_pseudo_labeled_data = []
     new_pseudo_labeled_indices = set()
-    if unlabeled_dataloader is not None:
+    if unlabeled_dataloader is not None and unlabeled_dataset is not None:
         print(f"Generating pseudo-labels with threshold {threshold}...")
         pseudo_label_progress_bar = tqdm(
             unlabeled_dataloader,
@@ -141,27 +159,42 @@ def evaluate_classification(model, eval_dataloader, criterion, device,
         model.eval() # Ensure model is in eval mode
         with torch.no_grad():
             for batch_idx, (images, _) in enumerate(pseudo_label_progress_bar):
-                images = images.to(device)
                 start_idx = batch_idx * unlabeled_dataloader.batch_size
-
-
-                logits = model(images, mask_ratio=None, mode='classify')
-                prob = torch.softmax(logits, dim=1)
-
-                max_probs, pred_labels = torch.max(prob, dim=1)
-
                 for i in range(images.size(0)):
                     global_idx = start_idx + i
                     if already_pseudo_labeled_indices and global_idx in already_pseudo_labeled_indices:
                         continue  # Skip already pseudo-labeled
-                    if max_probs[i].item() > threshold:
-                        new_pseudo_labeled_data.append((images[i].cpu().float(), pred_labels[i].unsqueeze(0).cpu().long()))
+
+                    img = images[i].cpu()
+                    # Apply weak and strong augmentations
+                    img_weak = weak_transform(img) if weak_transform else img
+                    img_strong = strong_transform(img) if strong_transform else img
+
+                    img_weak = img_weak.unsqueeze(0).to(device)
+                    img_strong = img_strong.unsqueeze(0).to(device)
+
+                    logits_weak = model(img_weak, None, 'classify')
+                    logits_strong = model(img_strong, None, 'classify')
+
+                    prob_weak = torch.softmax(logits_weak, dim=1)
+                    prob_strong = torch.softmax(logits_strong, dim=1)
+
+                    max_prob_weak, pred_label_weak = torch.max(prob_weak, dim=1)
+                    max_prob_strong, pred_label_strong = torch.max(prob_strong, dim=1)
+
+                    # Both must be confident and agree
+                    if (
+                        max_prob_weak.item() > threshold and
+                        max_prob_strong.item() > threshold and
+                        pred_label_weak.item() == pred_label_strong.item()
+                        ):
+                        img_path = unlabeled_dataset.samples[global_idx][0]
+                        new_pseudo_labeled_data.append((img_path, pred_label_weak.item()))
                         new_pseudo_labeled_indices.add(global_idx)
 
         print(f"Generated {len(new_pseudo_labeled_data)} new pseudo-labels.")
     
     return avg_eval_loss, epoch_eval_accuracy, new_pseudo_labeled_data, new_pseudo_labeled_indices
-
 
 def train_SSMAE_w_unlabeled(model, unlabeled_data_path, labeled_data_train_path, optimizer, device, 
                 num_epochs=100, labeled_data_test_path=None, checkpoint_path='models/best_model.pth', confidence_threshold=0.95, **kwargs):
@@ -175,6 +208,7 @@ def train_SSMAE_w_unlabeled(model, unlabeled_data_path, labeled_data_train_path,
     # Define transformations for labeled data
     # These should match the transformations used during training
     img_size = 224 # Example image size
+
     labeled_transform = transforms.Compose([
         transforms.Resize((img_size, img_size)),
         transforms.RandomHorizontalFlip(p=0.5),
@@ -191,6 +225,27 @@ def train_SSMAE_w_unlabeled(model, unlabeled_data_path, labeled_data_train_path,
         transforms.Normalize(mean=[0.485, 0.456, 0.406], 
                            std=[0.229, 0.224, 0.225])
     ])
+
+    # Weak augmentation (minimal changes)
+    weak_transform = transforms.Compose([
+        transforms.ToPILImage(),
+        transforms.Resize((224, 224)),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+
+    # Strong augmentation (heavy changes)
+    strong_transform = transforms.Compose([
+        transforms.ToPILImage(),
+        transforms.Resize((img_size, img_size)),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.RandomRotation(degrees=30),
+        transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.2),
+        transforms.RandomGrayscale(p=0.2),
+        transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
+        transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
 
     unlabeled_dataset = ImageFolder(root=unlabeled_data_path, transform=labeled_transform)
     labeled_dataset = ImageFolder(root=labeled_data_train_path, transform=labeled_transform)
@@ -216,22 +271,20 @@ def train_SSMAE_w_unlabeled(model, unlabeled_data_path, labeled_data_train_path,
 
     eval_dataloader = DataLoader(
         test_dataset,
-        batch_size=8,
+        batch_size=16,
         shuffle=False, # No need to shuffle for evaluation
         num_workers=4,
         pin_memory=True,
         drop_last=False # No need to drop last batch for evaluation
     )
 
-    def collate_fn(batch):
-        imgs  = torch.stack([b[0] for b in batch], dim=0)
-        labs  = torch.tensor([b[1] for b in batch], dtype=torch.long)
-        return imgs, labs
-
     model.train()
     criterion = nn.CrossEntropyLoss()
     best_val_accuracy = 0.0
-    active_pseudo_labels = [] # Stores (image_tensor, label_tensor) from previous epoch's eval
+
+    # For memory-efficient pseudo-labeling
+    pseudo_image_paths = []
+    pseudo_labels = []
     already_pseudo_labeled_indices = set() # Track indices of already pseudo-labeled samples
 
     original_labeled_dataset = labeled_dataloader.dataset
@@ -242,7 +295,6 @@ def train_SSMAE_w_unlabeled(model, unlabeled_data_path, labeled_data_train_path,
         'shuffle': True, # Shuffle should be true for training
         'num_workers': labeled_dataloader.num_workers,
         'pin_memory': labeled_dataloader.pin_memory,
-        'collate_fn': collate_fn
     }
 
     for epoch in range(num_epochs):
@@ -251,19 +303,14 @@ def train_SSMAE_w_unlabeled(model, unlabeled_data_path, labeled_data_train_path,
         correct = 0
         total = 0
 
-        # Prepare labeled dataloader for the current epoch (original + pseudo-labels)
-        current_epoch_labeled_dataloader = labeled_dataloader
-        if active_pseudo_labels:
-            pseudo_images, pseudo_labels = zip(*active_pseudo_labels)
-            if pseudo_images: # Ensure there are pseudo labels to process
-                pseudo_images_tensor = torch.stack(pseudo_images).float()
-                pseudo_labels_tensor = torch.stack(pseudo_labels).long().squeeze()
-                pseudo_dataset = TensorDataset(pseudo_images_tensor, pseudo_labels_tensor)
-
-                combined_dataset = ConcatDataset([original_labeled_dataset, pseudo_dataset])
-                current_epoch_labeled_dataloader = DataLoader(combined_dataset, **original_dataloader_params)
-                print(f"Epoch {epoch+1}: Training with {len(original_labeled_dataset)} original and {len(pseudo_dataset)} pseudo-labeled samples.")
+        # Prepare pseudo-label dataset for this epoch
+        if pseudo_image_paths:
+            pseudo_dataset = PseudoLabelDataset(pseudo_image_paths, pseudo_labels, transform=labeled_transform)
+            combined_dataset = ConcatDataset([original_labeled_dataset, pseudo_dataset])
+            current_epoch_labeled_dataloader = DataLoader(combined_dataset, **original_dataloader_params)
+            print(f"Epoch {epoch+1}: Training with {len(original_labeled_dataset)} original and {len(pseudo_dataset)} pseudo-labeled samples.")
         else:
+            current_epoch_labeled_dataloader = labeled_dataloader
             print(f"Epoch {epoch+1}: Training with {len(original_labeled_dataset)} original labeled samples only.")
 
         # Wrap the zipped dataloaders with tqdm for a progress bar
@@ -286,10 +333,10 @@ def train_SSMAE_w_unlabeled(model, unlabeled_data_path, labeled_data_train_path,
             all_images = torch.cat([unlabeled_images, labeled_images], dim=0)
 
             # MAE reconstruction loss from concatenated images
-            mae_loss, pred, mask = model(all_images, mode='mae')
+            mae_loss, pred, mask = model(all_images, None, 'mae')
 
             # Classification loss from labeled data only (which now includes pseudo-labels)
-            logits = model(labeled_images, mask_ratio=None, mode='classify')
+            logits = model(labeled_images, None, 'classify')
             cls_loss = criterion(logits, labels)
 
             # Combine both losses
@@ -325,7 +372,7 @@ def train_SSMAE_w_unlabeled(model, unlabeled_data_path, labeled_data_train_path,
         accuracy = 100. * correct / total if total > 0 else 0
         print(f'Epoch {epoch+1} completed, Average Total Loss: {avg_loss:.4f}, Training Accuracy: {accuracy:.2f}%')
 
-        if eval_dataloader is not None: # TODO: if a sample already passed the threshold, it should not be evaluated again
+        if eval_dataloader is not None:
             # Evaluate on the labeled validation set and generate new pseudo-labels for the next epoch
             # Pass unlabeled_eval_dataloader for pseudo-label generation
             _, epoch_eval_accuracy, new_pseudo_labels_from_eval, new_pseudo_label_indices = evaluate_classification(
@@ -334,15 +381,11 @@ def train_SSMAE_w_unlabeled(model, unlabeled_data_path, labeled_data_train_path,
                 criterion=criterion, 
                 device=device,
                 unlabeled_dataloader=unlabeled_dataloader, # Use this for pseudo-labeling
+                unlabeled_dataset=unlabeled_dataset,
                 threshold=confidence_threshold,
-                already_pseudo_labeled_indices=already_pseudo_labeled_indices
-            )
-
-            active_pseudo_labels = new_pseudo_labels_from_eval # Update pseudo-labels for the next epoch
-            already_pseudo_labeled_indices.update(new_pseudo_label_indices) # Update indices of already pseudo-labeled samples
-
-            print(f"New pseudo-labels this epoch: {len(new_pseudo_label_indices)}")
-            print(f"Total accumulated pseudo-labels: {len(already_pseudo_labeled_indices)}")
+                already_pseudo_labeled_indices=already_pseudo_labeled_indices,
+                weak_transform=weak_transform,
+                strong_transform=strong_transform)
 
             # Save the model if validation accuracy on Labeled data improves
             if epoch_eval_accuracy > best_val_accuracy:
@@ -351,6 +394,18 @@ def train_SSMAE_w_unlabeled(model, unlabeled_data_path, labeled_data_train_path,
                 os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
                 torch.save(model.state_dict(), checkpoint_path)
                 print(f"New best model saved with validation accuracy: {best_val_accuracy:.2f}% to {checkpoint_path}")
+            
+            # Store file paths and labels
+            for idx, (img_tensor, label_tensor) in zip(new_pseudo_label_indices, new_pseudo_labels_from_eval):
+                if idx not in already_pseudo_labeled_indices: # Avoid duplicates
+                    # Get file path from unlabeled_dataset
+                    img_path = unlabeled_dataset.samples[idx][0]
+                    pseudo_image_paths.append(img_path)
+                    pseudo_labels.append(label_tensor.item())
+                    already_pseudo_labeled_indices.add(idx)
+
+            print(f"Total accumulated pseudo-labels: {len(already_pseudo_labeled_indices)}")
+
             model.train() # Ensure model is back in training mode after evaluation
 
 def train_SSMAE(model, unlabeled_dataloader, labeled_dataloader, optimizer, device, 
@@ -386,10 +441,10 @@ def train_SSMAE(model, unlabeled_dataloader, labeled_dataloader, optimizer, devi
             all_images = torch.cat([unlabeled_images, labeled_images], dim=0)
 
             # MAE reconstruction loss from concatenated images
-            mae_loss, pred, mask = model(all_images, mode='mae')
+            mae_loss, pred, mask = model(all_images, None, 'mae')
 
             # Classification loss from labeled data only
-            logits = model(labeled_images, mode='classify')
+            logits = model(labeled_images, None, 'classify')
             cls_loss = criterion(logits, labels)
 
             # Combine both losses
