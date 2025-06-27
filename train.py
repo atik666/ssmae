@@ -3,7 +3,7 @@ import torch
 from torch import nn
 from tqdm import tqdm
 import os
-from torch.utils.data import TensorDataset, ConcatDataset, DataLoader, Dataset
+from torch.utils.data import ConcatDataset, DataLoader, Dataset
 from torchvision import transforms
 from torchvision.datasets import ImageFolder
 from PIL import Image
@@ -401,7 +401,7 @@ def train_SSMAE_w_unlabeled(model, unlabeled_data_path, labeled_data_train_path,
                     # Get file path from unlabeled_dataset
                     img_path = unlabeled_dataset.samples[idx][0]
                     pseudo_image_paths.append(img_path)
-                    pseudo_labels.append(label_tensor.item())
+                    pseudo_labels.append(label_tensor)
                     already_pseudo_labeled_indices.add(idx)
 
             print(f"Total accumulated pseudo-labels: {len(already_pseudo_labeled_indices)}")

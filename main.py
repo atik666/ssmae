@@ -1,9 +1,6 @@
-from train import create_mae_model
+# from train import create_mae_model, train_SSMAE_w_unlabeled
 import torch
-from torchvision.datasets import ImageFolder
-from torchvision import transforms
-from torch.utils.data import DataLoader
-from train import train_SSMAE, train_SSMAE_w_unlabeled
+from train_match import create_mae_model, train_SSMAE_w_unlabeled
 
 if __name__ == "__main__":
     # Create model for ImageNet classification (1000 classes)
@@ -39,7 +36,4 @@ if __name__ == "__main__":
         weight_decay=0.05  # Weight decay for regularization
     )
 
-    # TODO: need to pass the datapath (not dataloader) to the train function for doing the augmentation (transformations) later.
-
-    # train_SSMAE(model, unlabeled_dataloader, labeled_dataloader, optimizer, device, num_epochs=100, eval_dataloader=test_dataloader)
-    train_SSMAE_w_unlabeled(model, unlabeled_data_path, labeled_data_train_path, optimizer, device, num_epochs=100, labeled_data_test_path=labeled_data_test_path)
+    train_SSMAE_w_unlabeled(model, unlabeled_data_path, labeled_data_train_path, labeled_data_test_path, optimizer, device, num_epochs=400)
