@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader
 from torchvision import transforms, datasets
 import os
 from tqdm import tqdm
-from train_ssDenoMae import create_mae_model, evaluate_classification
+from main import create_mae_model, evaluate_classification
 
 def finetune_model(pretrained_model_path, train_data_path, test_data_path, device, 
                    num_classes=10, num_epochs=50, batch_size=32, learning_rate=1e-4,
@@ -191,18 +191,39 @@ def freeze_encoder_finetune(pretrained_model_path, train_data_path, test_data_pa
         print("Pretrained model loaded successfully")
     else:
         print(f"Warning: Pretrained model not found at {pretrained_model_path}")
-    
-    # Freeze encoder parameters
-    for param in model.encoder.parameters():
-        param.requires_grad = False
-    
+
+    # Freeze ALL components except classifier
+    components_to_freeze = [
+        # Encoder components
+        'patch_embed', 'encoder_blocks', 'encoder_norm', 'pos_embed', 'cls_token',
+        # Decoder components (these should be frozen for classification)
+        'mask_token', 'decoder_pos_embed', 'decoder_embed', 'decoder_blocks', 
+        'decoder_norm', 'decoder_pred'
+    ]
+
+    for component in components_to_freeze:
+        if hasattr(model, component):
+            print(f"Freezing {component} parameters...")
+            component_module = getattr(model, component)
+            if isinstance(component_module, nn.Parameter):
+                component_module.requires_grad = False
+            else:
+                for param in component_module.parameters():
+                    param.requires_grad = False
+
     # Only train classifier parameters
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     print(f"Trainable parameters: {sum(p.numel() for p in trainable_params):,}")
     
+    # Print which parameters are trainable for verification
+    print("Trainable parameter names:")
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print(f"  {name}: {param.numel():,} parameters")
+    
     # Use the same finetuning process but with frozen encoder
     return finetune_model(
-        pretrained_model_path=None,  # Don't reload since we already loaded
+        pretrained_model_path=pretrained_model_path,  # Don't reload since we already loaded
         train_data_path=train_data_path,
         test_data_path=test_data_path,
         device=device,
@@ -219,13 +240,14 @@ if __name__ == "__main__":
     print(f"Using device: {device}")
     
     # Paths
+    path = '/mnt/d/OneDrive - Rowan University/RA/Summer 25/SSMAE/'
     pretrained_model_path = "models/best_model_clean.pth"
-    train_data_path = "./data/train/labeled"  # Use your labeled training data
-    test_data_path = "./data/test"
-    
+    train_data_path = path+"data/cifar10/train/labeled_10"  # Use your labeled training data
+    test_data_path = path+"data/cifar10/test"
+
     # Finetuning parameters
-    num_classes = 10  # Adjust based on your dataset
-    num_epochs = 50
+    num_classes = 10 # Adjust based on your dataset
+    num_epochs = 100
     batch_size = 32
     learning_rate = 1e-4
     
@@ -239,22 +261,21 @@ if __name__ == "__main__":
         num_epochs=num_epochs,
         batch_size=batch_size,
         learning_rate=learning_rate,
-        checkpoint_path='models/finetuned_model.pth'
+        checkpoint_path='models/best_model_clean.pth'
     )
-    
-    print("\nStarting frozen encoder finetuning...")
-    frozen_model, frozen_accuracy = freeze_encoder_finetune(
-        pretrained_model_path=pretrained_model_path,
-        train_data_path=train_data_path,
-        test_data_path=test_data_path,
-        device=device,
-        num_classes=num_classes,
-        num_epochs=30,
-        batch_size=batch_size,
-        learning_rate=1e-3,
-        checkpoint_path='models/frozen_encoder_finetuned.pth'
-    )
-    
-    print(f"\nResults:")
     print(f"Full finetuning accuracy: {accuracy:.2f}%")
-    print(f"Frozen encoder finetuning accuracy: {frozen_accuracy:.2f}%")
+    
+    # print("\nStarting frozen encoder finetuning...")
+    # frozen_model, frozen_accuracy = freeze_encoder_finetune(
+    #     pretrained_model_path=pretrained_model_path,
+    #     train_data_path=train_data_path,
+    #     test_data_path=test_data_path,
+    #     device=device,
+    #     num_classes=num_classes,
+    #     num_epochs=100,
+    #     batch_size=batch_size,
+    #     learning_rate=1e-3,
+    #     checkpoint_path='models/frozen_encoder_finetuned.pth'
+    # )
+    
+    # print(f"Frozen encoder finetuning accuracy: {frozen_accuracy:.2f}%")

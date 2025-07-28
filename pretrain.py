@@ -4,7 +4,7 @@ from main import create_mae_model, train_SSMAE_w_unlabeled
 
 if __name__ == "__main__":
     # Create model for ImageNet classification (1000 classes)
-    model = create_mae_model('base', num_classes=100)
+    model = create_mae_model('base', num_classes=10)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Use all available GPUs
@@ -28,9 +28,9 @@ if __name__ == "__main__":
 
     path = '/mnt/d/OneDrive - Rowan University/RA/Summer 25/SSMAE/'
 
-    unlabeled_data_path = path + "data/train/unlabeled"
-    labeled_data_train_path = path + "data/train/labeled"
-    labeled_data_test_path = path + "data/test"
+    unlabeled_data_path = path + "data/cifar10/train/unlabeled"
+    labeled_data_train_path = path + "data/cifar10/train/labeled_10"
+    labeled_data_test_path = path + "data/cifar10/test"
 
     optimizer = torch.optim.AdamW(
         model.parameters(),

@@ -7,6 +7,9 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 from torchvision.datasets import ImageFolder
 
+import warnings
+warnings.filterwarnings('ignore')
+
 def create_mae_model(model_size='base', num_classes=1000):
     """Create MAE model with different sizes and classification capability"""
     configs = {
@@ -113,7 +116,7 @@ def evaluate_classification(model, eval_dataloader, criterion, device, calc_high
 
 def train_SSMAE_w_unlabeled(model, unlabeled_data_path, labeled_data_train_path, labeled_data_test_path, optimizer, device, 
                 num_epochs=100, checkpoint_path='models/best_model_clean.pth', 
-                confidence_threshold=0.95, high_conf_acc_threshold=85.0, cls_loss_weight=0.5, **kwargs):
+                confidence_threshold=0.95, high_conf_acc_threshold=70.0, cls_loss_weight=1.0, **kwargs):
     
     """
     Semi-supervised training with MAE, labeled and pseudo-labeling.
@@ -217,7 +220,7 @@ def train_SSMAE_w_unlabeled(model, unlabeled_data_path, labeled_data_train_path,
     pseudo_label_memory = {}  # {img_path: pseudo_label}
     best_val_accuracy = 0.0
     enable_pseudo_labeling = False  # Initialize pseudo-labeling flag
-    pseudo_label_start_epoch = 20  # Track the epoch when pseudo-labeling starts
+    pseudo_label_start_epoch = 10  # Track the epoch when pseudo-labeling starts
     epoch_eval_accuracy = 0.0  # Initialize evaluation accuracy
 
     for epoch in range(num_epochs):
